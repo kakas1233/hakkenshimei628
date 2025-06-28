@@ -1,12 +1,15 @@
 import streamlit as st
 from collections import Counter
 import random
+import math
+import io
+import pandas as pd
+from datetime import datetime
 
 # --- 乱数生成アルゴリズム定義 ---
 class Xorshift:
     def __init__(self, seed):
         self.state = seed if seed != 0 else 1
-
     def next(self):
         x = self.state
         x ^= (x << 13) & 0xFFFFFFFF
@@ -14,7 +17,6 @@ class Xorshift:
         x ^= (x << 5) & 0xFFFFFFFF
         self.state = x & 0xFFFFFFFF
         return self.state
-
     def generate(self, count):
         return [self.next() for _ in range(count)]
 
@@ -36,129 +38,131 @@ def middle_square(seed, count):
     return result
 
 def lcg(seed, count):
-    m = 2**32
-    a = 1664525
-    c = 1013904223
-    result = []
-    x = seed
+    m = 2**32; a = 1664525; c = 1013904223
+    result = []; x = seed
     for _ in range(count):
         x = (a * x + c) % m
         result.append(x)
     return result
 
 def calculate_variance(numbers, n):
-    mod_numbers = [x % n for x in numbers]
-    counts = Counter(mod_numbers)
-    all_counts = [counts.get(i, 0) for i in range(n)]
-    expected = len(numbers) / n
-    variance = sum((c - expected) ** 2 for c in all_counts) / n
-    return variance, mod_numbers
+    mod = [x % n for x in numbers]
+    counts = Counter(mod)
+    all_counts = [counts.get(i,0) for i in range(n)]
+    expected = len(numbers)/n
+    variance = sum((c-expected)**2 for c in all_counts)/n
+    return variance, mod
 
 @st.cache_data(show_spinner=False)
 def find_best_seed_and_method(k, l, n):
     seed_range = range(0, 1000001, 100)
-    count = int(k * l)
-    best_variance = float('inf')
-    best_method = None
-    best_seed = None
-    best_mod_result = None
-
-    for method_name in ["Xorshift", "Mersenne Twister", "Middle Square", "LCG"]:
+    count = k * l
+    best = (float('inf'), None, None, None)
+    for method in ["Xorshift","Mersenne Twister","Middle Square","LCG"]:
         for seed in seed_range:
-            if method_name == "Xorshift":
-                nums = Xorshift(seed).generate(count)
-            elif method_name == "Mersenne Twister":
-                nums = mersenne_twister(seed, count)
-            elif method_name == "Middle Square":
-                nums = middle_square(seed, count)
-            elif method_name == "LCG":
-                nums = lcg(seed, count)
-
+            nums = {
+                "Xorshift": Xorshift(seed).generate(count),
+                "Mersenne Twister": mersenne_twister(seed,count),
+                "Middle Square": middle_square(seed,count),
+                "LCG": lcg(seed,count)
+            }[method]
             var, modded = calculate_variance(nums, n)
-
-            if var < best_variance:
-                best_variance = var
-                best_method = method_name
-                best_seed = seed
-                best_mod_result = modded
-
-    return best_method, best_seed, best_variance, best_mod_result
+            if var < best[0]:
+                best=(var,method,seed,modded)
+    return best[1],best[2],best[0],best[3]
 
 def run_app():
-    st.title("🎲 年間指名表作成アプリ")
+    st.title("🎲 指名アプリ")
 
-    k = st.number_input("年間授業回数", value=30, min_value=1)
-    l = st.number_input("授業1回あたりの平均指名人数", value=5, min_value=1)
-    n = st.number_input("クラス人数", value=40, min_value=1)
+    # クラス選択と追加
+    if "class_list" not in st.session_state:
+        st.session_state.class_list = ["クラスA", "クラスB", "クラスC"]
+    class_options = st.session_state.class_list
+    new_class = st.text_input("➕ 新しいクラス名を追加", "")
+    if st.button("追加") and new_class and new_class not in class_options:
+        class_options.append(new_class)
+    tab = st.sidebar.selectbox("クラス選択", class_options)
 
-    name_input = st.text_area("✍️ 名前を改行区切りで入力（空欄箇所は自動生成します）", height=150)
-    raw_names = [name.strip() for name in name_input.split("\n") if name.strip()]
-    if len(raw_names) < n:
-        raw_names += [f"名前{i+1}" for i in range(len(raw_names), n)]
-    elif len(raw_names) > n:
-        raw_names = raw_names[:n]
-    names = raw_names
-    st.write("👥 名前リスト:")
-    st.write([f"{i+1} : {name}" for i, name in enumerate(names)])
+    st.header(f"📋 {tab} の設定")
+    k = st.number_input("年間授業回数", value=30, min_value=1, key=tab+"k")
+    l = st.number_input("授業1回あたりの平均指名人数", value=5, min_value=1, key=tab+"l")
+    n = st.number_input("クラス人数", value=40, min_value=1, key=tab+"n")
 
-    if st.button("📊 年間指名表を作成する"):
-        with st.spinner("最適な指名表を探索中..."):
-            best_method, best_seed, best_variance, best_mod_result = find_best_seed_and_method(k, l, n)
+    name_input = st.text_area("名前を改行区切りで入力（足りない分は自動補完します）", height=120, key=tab+"names")
+    raw = [x.strip() for x in name_input.split("\n") if x.strip()]
+    if len(raw)<n: raw += [f"名前{i+1}" for i in range(len(raw),n)]
+    elif len(raw)>n: raw=raw[:n]
+    names = raw
+    st.write("👥 メンバー:", [f"{i+1} : {name}" for i,name in enumerate(names)])
 
-        st.session_state.named_pool = best_mod_result.copy()
-        st.session_state.used_names = []
-        st.session_state.names = names
+    if st.button("📊 指名する準備を整える！", key=tab+"gen"):
+        with st.spinner("⚙️ 指名する準備を整えています…"):
+            method, seed, var, pool = find_best_seed_and_method(k, l, len(names))
+            std = math.sqrt(var)
+            exp = (k * l) / len(names)
+            lb, ub = exp - std, exp + std
+            st.session_state[tab + "_pool"] = pool
+            st.session_state[tab + "_used"] = []
+            st.session_state[tab + "_names"] = names
 
-        std_dev = best_variance ** 0.5
-        expected = (k * l) / n
-        min_calls = expected - std_dev
-        max_calls = expected + std_dev
-
-        st.success(
-            f"✅ 乱数を生成するのに用いた式: {best_method}（seed={best_seed}）\n\n"
-            f"📏 指名の偏り具合（標準偏差）: {std_dev:.2f}\n"
-            f"📊 1人あたり {min_calls:.2f} 回 〜 {max_calls:.2f} 回 指名されます"
+        st.success(f"✅ 使用した手法: {method}（seed={seed}, 指名回数の偏り具合={std:.2f}）")
+        st.markdown(
+            f"""
+            <div style="font-size: 28px; font-weight: bold; text-align: center; color: #2196F3; margin-top: 20px;">
+                1人あたりの指名回数は 約 {lb:.2f} ～ {ub:.2f} 回です。
+            </div>
+            """,
+            unsafe_allow_html=True
         )
-        st.info("🎯 指名ボタンを押すと1人ずつランダムに指名されます")
 
-    if st.button("🔄 全リセット"):
-        for key in ["named_pool", "used_names", "names"]:
-            if key in st.session_state:
-                del st.session_state[key]
+    if st.button("🔄 全リセット", key=tab+"reset"):
+        for key in [tab+"_pool",tab+"_used",tab+"_names"]:
+            st.session_state.pop(key,None)
         st.experimental_rerun()
 
-    if "named_pool" in st.session_state and "names" in st.session_state:
-        pool = st.session_state.named_pool
-        used = st.session_state.used_names
-        names = st.session_state.names
+    # 履歴読み込み（任意）
+    st.markdown("📂 過去の履歴ファイルを読み込む（再開したいときに使ってね）")
+    uploaded = st.file_uploader("CSVファイルを選択", type="csv", key=tab+"upload")
+    if uploaded:
+        df = pd.read_csv(uploaded)
+        indices = [int(row["番号"])-1 for _, row in df.iterrows()]
+        st.session_state[tab+"_used"] = indices
+        st.success("📥 履歴を読み込みました！")
 
-        pool_counter = Counter(pool)
-        used_counter = Counter(used)
+    # 指名セッション
+    if (tab+"_pool" in st.session_state) and (tab+"_names" in st.session_state):
+        pool = st.session_state[tab+"_pool"]
+        used = st.session_state[tab+"_used"]
+        names = st.session_state[tab+"_names"]
+        pc, uc = Counter(pool), Counter(used)
 
-        if st.button("🎯 指名！"):
-            remaining_counter_before = pool_counter - used_counter
-            remaining_before = list(remaining_counter_before.elements())
+        # 欠席者入力（毎回）
+        absent_input = st.text_area("⛔ 欠席者をここに入力（1回の指名ごとに変更可能）", height=80, key=tab+"absent_realtime")
+        absents = [x.strip() for x in absent_input.split("\n") if x.strip()]
+        available = [i for i, name in enumerate(names) if name not in absents]
 
-            if remaining_before:
-                selected = random.choice(remaining_before)
-                st.session_state.used_names.append(selected)
-
-                st.info(f"🎉 指名された番号: {selected+1} （名前: {names[selected]}）🎉")
-                st.markdown(f"<h1 style='text-align: center; color: green;'>{selected+1} : {names[selected]}</h1>", unsafe_allow_html=True)
+        if st.button("🎯 指名！", key=tab+"pick"):
+            rem = [i for i in (pc - uc).elements() if i in available]
+            if rem:
+                sel = random.choice(rem)
+                st.session_state[tab+"_used"].append(sel)
+                st.markdown(f"<div style='font-size:64px;text-align:center;color:#4CAF50;margin:30px;'>🎉 {sel+1} : {names[sel]} 🎉</div>", unsafe_allow_html=True)
             else:
-                st.warning("✅ 全員の指名が完了しました！")
+                st.warning("✅ 全回数分または全出席者の指名が完了しました！")
 
-        used = st.session_state.used_names
-        used_counter = Counter(used)
-        remaining_counter = pool_counter - used_counter
-        remaining = list(remaining_counter.elements())
+        used = st.session_state[tab+"_used"]
+        df = pd.DataFrame([(i+1, names[i]) for i in used], columns=["番号", "名前"])
+        csv = io.StringIO(); df.to_csv(csv, index=False)
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        filename = f"{tab}_{timestamp}_history.csv"
+        st.download_button("⬇️ 指名履歴のダウンロード", csv.getvalue(), file_name=filename)
 
-        st.write(f"📌 残り指名可能人数: {len(remaining)} / {len(pool)}")
+        rem = len(list((pc - Counter(used)).elements()))
+        st.write(f"📌 残り指名可能人数: {rem} / {len(pool)}")
 
         if used:
-            st.write(f"📋 指名済み一覧（{len(used)}人）:")
-            named_list = [f"{i+1} : {names[i]}" for i in used]
-            st.write(named_list)
+            st.write("📋 指名済み:")
+            st.write(df)
 
 if __name__ == "__main__":
     run_app()
